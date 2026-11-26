@@ -3,7 +3,7 @@
 A pairs-trading research system: find cointegrated stock pairs, model their spread as an
 Ornstein-Uhlenbeck process, and (in later stages) backtest and paper-trade it on Alpaca.
 
-**Status:** Stage 1 (pair screening + OU modeling) ✅ · Stage 2 (Kalman hedge ratio) ✅ · Stage 3 (backtest) · Stage 4 (live paper trading)
+**Status:** Stage 1 (pair screening + OU modeling) ✅ · Stage 2 (Kalman hedge ratio) ✅ · Stage 3 (walk-forward backtest) ✅ · Stage 4 (live paper trading)
 
 ## The math
 
@@ -99,6 +99,64 @@ passed formation (e.g. CL/KHC, BAC/PNC) broke in 2024–26. Some are far from th
 reasons: these are heavily traded stocks where simple pairs have been arbitraged away, and
 2020–2023 included regime changes (COVID, rate hikes).
 
+## Stage 3: walk-forward backtest
+
+`src/backtest.py`, `run_backtest.py`. Every trading year from 2019 to 2026:
+pick pairs using **only** earlier data, freeze all parameters, then trade the year.
+
+**Rules, fixed before any results were seen:** enter at |z| > 2 (but not beyond the stop),
+exit at |z| < 0.5, stop-loss at |z| > 4, time stop at 3× half-life, flat at year end.
+Orders execute one day after the signal. Each pair is $1 gross (dollar-weighted legs),
+and capital is split across max(#pairs, 5) slots. **Costs:** 5 bp per side for slippage and
+half-spread, plus 0.5%/yr to borrow the short leg. Results are also shown at 0, 10 and 20 bp.
+Tests check a hand-computed trade, per-side cost accounting, year-end closing, and that
+scrambling future prices can't change past returns (no look-ahead).
+
+**Universes:** 6 × ~20 names, mid caps included (regional banks, utilities, energy, REITs,
+staples, country ETFs), with daily data from 2016.
+
+Two ways to pick pairs, with the same trading rules and costs:
+- **`coint`:** the stage-1 statistical screen. 3-year window: fit on 2 years, validate on the 3rd.
+- **`distance`:** the Gatev-Goetzmann-Rouwenhorst (2006) benchmark. Each year, trade the 5 pairs
+  whose normalized prices tracked each other most closely over the previous 12 months.
+  No significance test. (GGR trade for 6 months and use no stop; this version uses the rules above.)
+
+### Results
+
+**Statistical screen: almost nothing to trade.** Out of 8,672 pair-years, 562 (6.5%) were
+significant before correction. If no pair were real, chance alone would give 5%. After
+Benjamini-Hochberg, 21 remained, and 1 also held up in the validation year. One pair traded
+twice in 8 years. The thresholds were **not** loosened to produce trades.
+
+**Distance method: trades a lot, earns nothing.**
+
+| Universe | Sharpe, 0 bp | Sharpe, 5 bp | Sharpe, 20 bp | Trades |
+|---|---|---|---|---|
+| banks | +0.16 | −0.08 | −0.82 | 259 |
+| utilities | −0.24 | −0.60 | −1.67 | 290 |
+| energy | +0.32 | +0.19 | −0.20 | 215 |
+| REITs | −0.04 | −0.34 | −1.21 | 221 |
+| staples | −0.01 | −0.20 | −0.80 | 247 |
+| country ETFs | −0.07 | −0.48 | −1.67 | 277 |
+| **all 6 combined** | **+0.16** (t = 0.46) | **−0.41** (t = −1.16) | | 1,509 |
+
+The best single result (energy, +0.19 after costs) is the best of 6 tries and has t ≈ 0.5, so it isn't
+evidence of anything. Why it loses: 817 of 1,509 trades hit the stop-loss (average −1.2%).
+The spread usually keeps widening instead of reverting. Trades that do revert earn +2.8%, but there
+are too few of them. This matches the literature: Do & Faff (2010) found distance-method profits
+largely disappeared after 2002.
+
+On synthetic data with planted pairs, the same code earns Sharpe +1.6 (coint) and +0.7 (distance)
+after costs, so the negative result reflects the market, not a bug.
+
+**Conclusion:** after realistic costs, neither method makes money in these universes from 2019 to 2026.
+Per the project plan, nothing is promoted to paper trading on the strength of this backtest.
+
+```bash
+python run_backtest.py --demo --select coint distance
+python run_backtest.py --universe all --select coint distance --costs 0 5 10 20
+```
+
 ## Validation on synthetic data
 
 `python run_screen.py --demo` builds a market of 12 random walks plus 3 planted cointegrated
@@ -130,4 +188,6 @@ Results are saved to `results/screen_<name>.csv` (or `screen_<name>_kalman.csv`)
 - **ADF over-rejects** when a random walk carries large stationary noise (Schwert, 1989). If one
   stock has strong mean reversion of its own, it can occasionally pair with an unrelated stock.
   The out-of-sample half-life check catches most of these.
+- **Backtest simplifications:** daily closes only (no intraday fills), constant dollar weights
+  with daily rebalancing that is not charged costs, idle cash earns 0, no short-sale availability constraints.
 - **Only one hedge ratio per pair.** Baskets (Johansen) are not yet supported.
