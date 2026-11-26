@@ -1,11 +1,62 @@
-# Statistical Arbitrage with Ornstein-Uhlenbeck Spreads
+# Pairs Trading, Tested Honestly
 
-A pairs-trading research system: find cointegrated stock pairs, model their spread as an
-Ornstein-Uhlenbeck process, and (in later stages) backtest and paper-trade it on Alpaca.
+![tests](https://github.com/sashakrem/alpaca-pairs/actions/workflows/tests.yml/badge.svg)
 
-**Status:** Stage 1 (pair screening + OU modeling) ✅ · Stage 2 (Kalman hedge ratio) ✅ · Stage 3 (walk-forward backtest) ✅ · Stage 4 (live paper trading)
+A statistical-arbitrage research project: find stock pairs whose spread mean-reverts, model the
+spread as an **Ornstein-Uhlenbeck process**, track the hedge ratio with a **Kalman filter**, and
+run a **walk-forward backtest** with realistic costs on daily data from Alpaca (2016–2026).
 
-## The math
+**Result: after costs, pairs trading did not make money on these ~120 US stocks and ETFs from
+2019 to 2026.** The code finds planted pairs in synthetic data, so this reflects the market, not a bug.
+The project's value is in how carefully that conclusion was reached.
+
+![Distance-method equity curves at 0, 5 and 20 bp costs](docs/figures/equity_curves.png)
+
+## Key findings
+
+1. **Multiple testing decides everything.** Across 8,672 pair-years, 6.5% look "cointegrated"
+   at p < 0.05, barely above the 5% that pure noise produces. After Benjamini-Hochberg and an
+   out-of-sample check, **1** survives.
+2. **Pairs break.** Pairs that were cointegrated for years, like Colgate / Kraft Heinz, drifted 7
+   standard deviations apart once the out-of-sample period began.
+3. **Two common Kalman-filter setups find pairs in pure noise.** The textbook random-intercept
+   model and a level-space model both did. The fix: model daily returns with the OU spread as a
+   state, and test the self-financing portfolio you'd actually hold.
+4. **Costs eat what's left.** The standard academic benchmark (Gatev et al. 2006 distance
+   method) earns Sharpe +0.16 before costs (t = 0.46) and −0.41 at 5 bp per side.
+
+## What's in the repo
+
+| Stage | What it does | Code |
+|---|---|---|
+| 1. Screen | Engle-Granger cointegration, Benjamini-Hochberg FDR, OU fit, out-of-sample ADF | `src/screen.py`, `src/ou.py` |
+| 2. Kalman | Time-varying hedge ratio, OU spread as a state, MLE, numba-compiled filter | `src/kalman.py` |
+| 3. Backtest | Walk-forward yearly re-selection, 1-day execution lag, per-side costs + borrow | `src/backtest.py` |
+| 4. Paper trading | Not started: the backtest gave no strategy worth running | |
+
+16 tests (`tests/`) cover the math and the pipeline, including synthetic ground-truth checks,
+a no-look-ahead test, and tests that reproduce both Kalman traps.
+
+## Quick start
+
+```bash
+git clone https://github.com/sashakrem/alpaca-pairs && cd alpaca-pairs
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python -m pytest                                    # no API keys needed
+python run_screen.py --demo                         # synthetic market, no keys needed
+python run_backtest.py --demo --select coint distance
+```
+
+For real data, copy `.env.example` to `.env` and add free Alpaca **paper-trading** keys, then:
+
+```bash
+python run_screen.py --universe staples [--method kalman]
+python run_backtest.py --universe all --select coint distance --costs 0 5 10 20
+python make_figures.py                              # regenerate the charts in docs/figures/
+```
+
+## Stage 1: the math
 
 **Cointegration.** Two prices can each be random walks while a linear combination
 `log Y − β log X − α` is stationary. That combination, the spread, is what we trade.
@@ -93,6 +144,8 @@ fixed β is more powerful, because it has fewer parameters to estimate.
 | staples, banks, energy, semis, utilities (225 pairs) | 0 | 0 |
 | control: GLD/IAU, SPY/IVV, GOOGL/GOOG, EWA/EWC | 0 | 1 (GLD/IAU) |
 
+![CL vs KHC spread z-score breaking out of its range after 2024](docs/figures/broken_pair.png)
+
 No large-cap pair in these sectors held up out of sample with either method. The pairs that
 passed formation (e.g. CL/KHC, BAC/PNC) broke in 2024–26. Some are far from their mean
 (CL/KHC at z ≈ 7), and a naive strategy would keep adding to that losing position. The likely
@@ -122,6 +175,8 @@ Two ways to pick pairs, with the same trading rules and costs:
   No significance test. (GGR trade for 6 months and use no stop; this version uses the rules above.)
 
 ### Results
+
+![Screening funnel: 8,672 to 562 to 21 to 1](docs/figures/screen_funnel.png)
 
 **Statistical screen: almost nothing to trade.** Out of 8,672 pair-years, 562 (6.5%) were
 significant before correction. If no pair were real, chance alone would give 5%. After
@@ -165,24 +220,15 @@ FDR control, and both pairs flagged as candidates are planted ones with β and h
 recovered. One planted pair fails the holdout ADF test (p = 0.07): with about 190 holdout days,
 ADF has limited power. That's the false-negative cost of a strict filter.
 
-## Setup
+## Command reference
 
-```bash
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env        # then paste your Alpaca *paper* keys into .env
-python -m pytest            # math checks, no keys needed
-python run_screen.py --demo # synthetic run, no keys needed
-python run_screen.py --universe staples
-python run_screen.py --universe staples --method kalman   # stage 2
-python run_screen.py --demo --method kalman --beta-drift 1.0
-```
-
-Universes: `banks`, `energy`, `staples`, `semis`, `utilities`, or `--symbols A B C ...`.
-Results are saved to `results/screen_<name>.csv` (or `screen_<name>_kalman.csv`).
+`run_screen.py`: `--universe` (`banks`, `energy`, `staples`, `semis`, `utilities`, or a wide universe
+such as `banks_wide`) or `--symbols A B C`; `--method static|kalman`; `--demo [--beta-drift 1.0]`.
+`run_backtest.py`: `--universe NAME|all`, `--select coint distance`, `--costs 0 5 10 20`.
+Outputs go to `results/`; downloaded prices are cached in `data/`. Both are git-ignored.
 
 ## Known limitations
-- **Survivorship bias:** universes are today's large caps.
+- **Survivorship bias:** universes are built from companies that exist today, so failed and acquired companies are missing.
 - **Engle-Granger** assumes a single cointegrating vector. Johansen is the multivariate generalization (planned).
 - **Kalman sensitivity:** with a stable β it finds fewer real pairs than the static screen (11/18 vs 18/18).
 - **ADF over-rejects** when a random walk carries large stationary noise (Schwert, 1989). If one
@@ -191,3 +237,11 @@ Results are saved to `results/screen_<name>.csv` (or `screen_<name>_kalman.csv`)
 - **Backtest simplifications:** daily closes only (no intraday fills), constant dollar weights
   with daily rebalancing that is not charged costs, idle cash earns 0, no short-sale availability constraints.
 - **Only one hedge ratio per pair.** Baskets (Johansen) are not yet supported.
+
+## References
+
+- Engle & Granger (1987). Co-integration and error correction. *Econometrica* 55(2).
+- Benjamini & Hochberg (1995). Controlling the false discovery rate. *JRSS B* 57(1).
+- Schwert (1989). Tests for unit roots: a Monte Carlo investigation. *JBES* 7(2).
+- Gatev, Goetzmann & Rouwenhorst (2006). Pairs trading: performance of a relative-value arbitrage rule. *RFS* 19(3).
+- Do & Faff (2010). Does simple pairs trading still work? *Financial Analysts Journal* 66(4).
